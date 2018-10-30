@@ -2,6 +2,7 @@ Puppet::Type.type(:logical_volume).provide :lvm do
     desc "Manages LVM logical volumes on Linux"
 
     confine :kernel => :linux
+    has_feature :thin
 
     commands :lvcreate   => 'lvcreate',
              :lvremove   => 'lvremove',
@@ -15,7 +16,8 @@ Puppet::Type.type(:logical_volume).provide :lvm do
              :blkid      => 'blkid',
              :dmsetup    => 'dmsetup',
              :lvconvert  => 'lvconvert',
-             :lvdisplay  => 'lvdisplay'
+             :lvdisplay  => 'lvdisplay',
+             :lvchange   => 'lvchange'
 
     optional_commands :xfs_growfs => 'xfs_growfs',
                       :resize4fs  => 'resize4fs'
@@ -27,6 +29,14 @@ Puppet::Type.type(:logical_volume).provide :lvm do
         # Save the volume group in the provider so the type can find it
         instance.volume_group = logical_volumes_properties[:volume_group]
         instance
+      end
+    end
+
+    def self.prefetch(resources)
+      instances.each do |prov|
+        if (resource = resources[prov.name])
+          resource.provider = prov
+        end
       end
     end
 
@@ -52,6 +62,7 @@ Puppet::Type.type(:logical_volume).provide :lvm do
       logical_volumes_properties[:ensure]       = :present
       logical_volumes_properties[:name]         = output_array[0]
       logical_volumes_properties[:volume_group] = output_array[1]
+      logical_volumes_properties[:lv_attrs]     = output_array[2]
 
       logical_volumes_properties
     end
@@ -150,23 +161,18 @@ Puppet::Type.type(:logical_volume).provide :lvm do
     end
 
     def destroy
-        name_escaped = "#{@resource[:volume_group].gsub('-','--')}-#{@resource[:name].gsub('-','--')}"
-        if blkid(path) =~ /\bTYPE=\"(swap)\"/
+        name_escaped = "#{@property_hash[:volume_group].gsub('-','--')}-#{@resource[:name].gsub('-','--')}"
+        unless volume_type == :thin_pool
+          if blkid(path) =~ /\bTYPE=\"(swap)\"/
             swapoff(path)
+          end
         end
         dmsetup('remove', name_escaped)
         lvremove('-f', path)
     end
 
     def exists?
-        begin
-            lvs(@resource[:volume_group]) =~ /#{@resource[:name]}/
-        rescue Puppet::ExecutionFailure
-            # lvs fails if we give it an empty volume group name, as would
-            # happen if we were running `puppet resource`. This should be
-            # interpreted as "The resource does not exist"
-            nil
-        end
+      @property_hash[:ensure] == :present
     end
 
     def size
@@ -325,6 +331,48 @@ Puppet::Type.type(:logical_volume).provide :lvm do
         end
     end
 
+    def thin_zeroing=(value)
+      raise Puppet::Error, 'thin zeroing mode can only be set on thin volume pools' unless volume_type == :thin_pool
+
+      value = if value == :true
+                'y'
+              else
+                'n'
+              end
+      args = ['--zero', value, "#{@property_hash[:volume_group]}/#{@resource[:name]}"]
+      lvchange(*args)
+    end
+
+    def thin_zeroing
+      return nil unless volume_type == :thin_pool
+      return :false unless @property_hash[:lv_attrs][7, 1] == 'z'
+      :true
+    end
+
+    def volume_type
+      {
+        'C' => :cache,
+        'm' => :mirrored,
+        'M' => :mirrored_without_initial_sync,
+        'o' => :origin,
+        'O' => :origin_with_mergingsnapshot,
+        'r' => :raid,
+        'R' => :raid_without_initial_sync,
+        's' => :snapshot,
+        'S' => :merging_snapshot,
+        'p' => :pvmove,
+        'v' => :virtual_mirror,
+        'i' => :raid_image_mirror,
+        'I' => :raid_image_out_of_sync_mirror,
+        'l' => :log_device,
+        'c' => :under_conversion,
+        'V' => :thin_volume,
+        't' => :thin_pool,
+        'T' => :thin_pool_data,
+        'e' => :raid_or_pool_metadata
+      }[@property_hash[:lv_attrs][0, 1]]
+    end
+
     private
 
     def lvs_pattern
@@ -334,12 +382,12 @@ Puppet::Type.type(:logical_volume).provide :lvm do
     end
 
     def path
-        "/dev/#{@resource[:volume_group]}/#{@resource[:name]}"
+        "/dev/#{@property_hash[:volume_group]}/#{@resource[:name]}"
     end
 
     # Device path of only the volume group (does not include the logical volume).
     def vgpath
-        "/dev/#{@resource[:volume_group]}"
+        "/dev/#{@property_hash[:volume_group]}"
     end
 
 end

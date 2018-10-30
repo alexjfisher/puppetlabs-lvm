@@ -1,6 +1,7 @@
 require 'puppet/parameter/boolean'
 
 Puppet::Type.newtype(:logical_volume) do
+  feature :thin, 'The ability to create thinly provisioned volumes'
 
   ensurable
 
@@ -86,7 +87,7 @@ Puppet::Type.newtype(:logical_volume) do
     end
   end
 
-  newparam(:thinpool) do
+  newparam(:thinpool, required_features: :thin) do
     desc "Set to true to create a thin pool or to pool name to create thin volume"
     defaultto false
     validate do |value|
@@ -101,6 +102,21 @@ Puppet::Type.newtype(:logical_volume) do
         value
       else
         false
+      end
+    end
+  end
+
+  newproperty(:thin_zeroing, required_features: :thin) do
+    desc 'The thin provisioing zero mode. Set to false to not zero new data blocks.'
+    munge do |value|
+      value = value.downcase if value.respond_to? :downcase
+      case value
+      when true, :true, 'true', :yes, 'yes'
+        :true
+      when false, :false, 'false', :no, 'no'
+        :false
+      else
+        raise ArgumentError, 'expected a boolean value'
       end
     end
   end
@@ -216,7 +232,7 @@ Puppet::Type.newtype(:logical_volume) do
 
 
   autorequire(:volume_group) do
-    @parameters[:volume_group].value
+    @parameters[:volume_group].value unless @parameters[:volume_group].nil?
   end
   autorequire(:logical_volume) do
     if @parameters[:thinpool].is_a? String
